@@ -7,9 +7,15 @@ WS : [ \t\r\n]+ ;
 LINE_COMMENT        : '--' ~[\r\n]* ;
 BLOCK_COMMENT       : '/*' .*? '*/' ;
 
-// Strings
-SINGLE_QUOTE_STRING : '\'' ( '\'\'' | ~'\'' )* '\'' ;
-DOUBLE_QUOTE_STRING : '"'  ( '""'   | ~'"'   )* '"' ;
+UNCLOSED_SINGLE_QUOTE_STRING : '\'' (~['\r\n])* ('\r'? '\n') ;
+UNCLOSED_DOUBLE_QUOTE_STRING : '"' (~["\r\n])* ('\r'? '\n')  ;
+UNCLOSED_BACKTICK_IDENTIFIER : '`' (~['`\r\n])* ('\r'? '\n') ;
+UNCLOSED_BRACKET_IDENTIFIER  : '[' ~[\]\r\n]* ('\r'? '\n') ;
+
+BACKTICK_IDENTIFIER      : '`' ( '``' | ~'`' )* '`' ;
+BRACKET_IDENTIFIER       : '[' ( ']]' | ~']' )* ']' ;
+DOUBLE_QUOTE_STRING      : '"' ( '""' | ~'"' )* '"' ;
+SINGLE_QUOTE_STRING      : '\'' ( '\'\'' | ~'\'' )* '\'' ;
 
 // PostgreSQL / Snowflake dollar-quoted strings: $$…$$ or $tag$…$tag$
 DOLLAR_QUOTE
