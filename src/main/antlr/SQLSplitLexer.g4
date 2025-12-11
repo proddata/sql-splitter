@@ -1,7 +1,7 @@
 lexer grammar SQLSplitLexer;
 
 // Whitespace
-WS                  : [ \t\r\n]+ -> skip ;
+WS : [ \t\r\n]+ ;
 
 // Comments
 LINE_COMMENT        : '--' ~[\r\n]* ;
@@ -11,9 +11,9 @@ BLOCK_COMMENT       : '/*' .*? '*/' ;
 SINGLE_QUOTE_STRING : '\'' ( '\'\'' | ~'\'' )* '\'' ;
 DOUBLE_QUOTE_STRING : '"'  ( '""'   | ~'"'   )* '"' ;
 
-// PostgreSQL dollar-quoted strings: $$…$$ or $tag$ … $tag$
+// PostgreSQL / Snowflake dollar-quoted strings: $$…$$ or $tag$…$tag$
 DOLLAR_QUOTE
-    : '$' TAG? '$' .*? '$' TAG? '$'
+    : '$' TAG? '$' (~'$')* '$' TAG? '$'
     ;
 fragment TAG : [A-Za-z_][A-Za-z_0-9]* ;
 
@@ -23,11 +23,8 @@ END_KW              : [Ee][Nn][Dd] ;
 
 // Delimiters
 SEMICOLON           : ';' ;
-GO_DELIMITER        : [Gg][Oo] ;
 SLASH_DELIMITER     : '/' ;
 
-// Keywords (fallback)
+// Fallback keyword and other tokens
 KEYWORD             : [A-Za-z_][A-Za-z_0-9]* ;
-
-// Fallback token
 OTHER               : . ;
