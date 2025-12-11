@@ -6,7 +6,9 @@ import io.kestra.sql.dialect.SqlDialectRegistry;
 import io.kestra.sql.grammar.SQLSplitLexer;
 import org.antlr.v4.runtime.*;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 public class SimpleSqlSplitter {
@@ -26,79 +28,154 @@ public class SimpleSqlSplitter {
         List<String> result = new ArrayList<>();
         StringBuilder current = new StringBuilder();
 
-        int blockDepth = 0;
-        boolean hasContent = false;   // <-- NEW: tracks whether statement has real content
+        Deque<String> blockStack = new ArrayDeque<>();   // BEGIN, LOOP, IF, CASE
+        boolean hasContent = false;
+        boolean endJustClosed = false;                   // END that just closed OUTERMOST block
 
         for (int i = 0; i < tokens.size(); i++) {
             Token token = tokens.get(i);
-            int type = token.getType();
-            String text = token.getText();
+            int type  = token.getType();
+            String text  = token.getText();
+            String upper = text.toUpperCase();
 
-            // Skip EOF entirely (fixes <EOF> appearing in last statement)
+            // Stop at EOF
             if (type == Token.EOF) {
                 break;
             }
 
-            // Skip leading comments before first real statement token
+            // Skip leading comments entirely
             if (!hasContent &&
                     (type == SQLSplitLexer.LINE_COMMENT || type == SQLSplitLexer.BLOCK_COMMENT)) {
                 continue;
             }
 
-            // Dollar-quoted blocks (Postgres, Snowflake)
+            // Dollar-quoted blocks (Postgres / Snowflake)
             if (type == SQLSplitLexer.DOLLAR_QUOTE && config.supportsDollarQuotes()) {
                 current.append(text);
                 hasContent = true;
                 continue;
             }
 
-            // BEGIN / END block handling
+            // -----------------------
+            // Block stack management
+            // -----------------------
             if (config.supportsBeginEndBlocks()) {
-                if (isBeginBlock(i, tokens)) {
-                    blockDepth++;
-                } else if (text.equalsIgnoreCase("END")) {
-                    blockDepth = Math.max(0, blockDepth - 1);
+                // BEGIN (generic)
+                if (upper.equals("BEGIN")) {
+                    blockStack.push("BEGIN");
+                    endJustClosed = false;
+                }
+                // LOOP (PL/SQL, etc.)
+                else if (upper.equals("LOOP")) {
+                    blockStack.push("LOOP");
+                    endJustClosed = false;
+                }
+                // IF / CASE blocks
+                else if (upper.equals("IF")) {
+                    blockStack.push("IF");
+                    endJustClosed = false;
+                } else if (upper.equals("CASE")) {
+                    blockStack.push("CASE");
+                    endJustClosed = false;
+                }
+                // END, END LOOP, END IF, END CASE
+                else if (upper.equals("END")) {
+                    String nextUpper = "";
+                    if (i + 1 < tokens.size()) {
+                        nextUpper = tokens.get(i + 1).getText().toUpperCase();
+                    }
+
+                    String top = blockStack.peek();
+
+                    if (top != null) {
+                        // END LOOP
+                        if (nextUpper.equals("LOOP") && top.equals("LOOP")) {
+                            blockStack.pop();
+                        }
+                        // END IF
+                        else if (nextUpper.equals("IF") && top.equals("IF")) {
+                            blockStack.pop();
+                        }
+                        // END CASE
+                        else if (nextUpper.equals("CASE") && top.equals("CASE")) {
+                            blockStack.pop();
+                        }
+                        // Plain END; closes whatever is on the stack (typically BEGIN)
+                        else if (!nextUpper.equals("LOOP")
+                                && !nextUpper.equals("IF")
+                                && !nextUpper.equals("CASE")) {
+                            blockStack.pop();
+                        }
+
+                        // endJustClosed is only relevant if we just closed the OUTERMOST block
+                        endJustClosed = blockStack.isEmpty();
+                    } else {
+                        endJustClosed = false;
+                    }
                 }
             }
 
-            // SQL Server GO
+            // -----------------------
+            // SQL Server GO delimiter
+            // -----------------------
             if (config.supportsGoDelimiter() && isGoDelimiter(token, script)) {
                 flushCurrent(result, current);
                 hasContent = false;
+                endJustClosed = false;
+                blockStack.clear();   // conservative reset for safety
                 continue;
             }
 
-            // Oracle slash delimiter
+            // -----------------------
+            // Oracle slash delimiter (/)
+            // -----------------------
             if (config.supportsSlashDelimiter() && isSlashDelimiter(token, script)) {
                 flushCurrent(result, current);
                 hasContent = false;
+                endJustClosed = false;
+                blockStack.clear();
                 continue;
             }
 
-            // Semicolon splitting when not inside BEGIN...END
-            boolean safeSemicolon =
-                    config.semicolonIsDelimiter()
-                            && type == SQLSplitLexer.SEMICOLON
-                            && blockDepth == 0;
-
-            if (safeSemicolon) {
-                flushCurrent(result, current);
-                hasContent = false;
+            // -----------------------
+            // Semicolon handling
+            // -----------------------
+            if (type == SQLSplitLexer.SEMICOLON && config.semicolonIsDelimiter()) {
+                if (blockStack.isEmpty()) {
+                    if (endJustClosed) {
+                        // This semicolon directly follows END of outermost block:
+                        // do NOT split, just make the block END; one statement.
+                        current.append(text);
+                        endJustClosed = false;
+                    } else {
+                        // Top-level delimiter: split
+                        flushCurrent(result, current);
+                        hasContent = false;
+                        endJustClosed = false;
+                    }
+                } else {
+                    // Inside any block (BEGIN/LOOP/IF/CASE): never split
+                    current.append(text);
+                    // keep endJustClosed as-is
+                }
                 continue;
             }
 
-            // Append all other tokens (including whitespace!)
+            // Normal tokens → append
             current.append(text);
 
-            // Mark content when encountering significant tokens
-            if (type != SQLSplitLexer.WS
-                    && type != SQLSplitLexer.LINE_COMMENT
-                    && type != SQLSplitLexer.BLOCK_COMMENT) {
+            // Mark that we've seen content (anything but pure whitespace/comments)
+            if (type != SQLSplitLexer.WS &&
+                    type != SQLSplitLexer.LINE_COMMENT &&
+                    type != SQLSplitLexer.BLOCK_COMMENT) {
                 hasContent = true;
+                // For any non-structural token after END, we no longer care about endJustClosed
+                // but since we only use endJustClosed in conjunction with an immediate semicolon,
+                // and we handle that above, we don't strictly need to reset it here.
             }
         }
 
-        // trailing statement
+        // Trailing statement
         flushCurrent(result, current);
 
         return result;
@@ -106,33 +183,12 @@ public class SimpleSqlSplitter {
 
     private void flushCurrent(List<String> result, StringBuilder current) {
         String sql = current.toString().trim();
-
         if (sql.isEmpty() || sql.equals("<EOF>")) {
             current.setLength(0);
             return;
         }
-
         result.add(sql);
         current.setLength(0);
-    }
-
-    private boolean isBeginBlock(int index, List<Token> tokens) {
-        Token token = tokens.get(index);
-        String text = token.getText();
-
-        if (!text.equalsIgnoreCase("BEGIN")) {
-            return false;
-        }
-
-        // DB2 / AS400: BEGIN ATOMIC
-        if (config.supportsAtomicBlocks() && index + 1 < tokens.size()) {
-            Token next = tokens.get(index + 1);
-            if (next.getText().equalsIgnoreCase("ATOMIC")) {
-                return true;
-            }
-        }
-
-        return true;
     }
 
     private boolean isGoDelimiter(Token token, String script) {
@@ -140,24 +196,21 @@ public class SimpleSqlSplitter {
         if (!text.equalsIgnoreCase("GO")) {
             return false;
         }
-
         String line = extractLine(token, script).trim();
         return line.equalsIgnoreCase("GO");
     }
 
     private boolean isSlashDelimiter(Token token, String script) {
-        String text = token.getText();
-        if (!"/".equals(text)) {
+        if (!"/".equals(token.getText())) {
             return false;
         }
-
         String line = extractLine(token, script).trim();
         return "/".equals(line);
     }
 
     private String extractLine(Token token, String script) {
         int start = token.getStartIndex();
-        int stop = token.getStopIndex();
+        int stop  = token.getStopIndex();
 
         int lineStart = start;
         while (lineStart > 0) {

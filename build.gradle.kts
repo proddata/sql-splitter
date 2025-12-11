@@ -1,6 +1,7 @@
 plugins {
     java
     antlr
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 group = "io.kestra.sql"
@@ -11,8 +12,11 @@ repositories {
 }
 
 dependencies {
-    antlr("org.antlr:antlr4:4.13.1") // latest stable
+    // ANTLR
+    antlr("org.antlr:antlr4:4.13.1")
     implementation("org.antlr:antlr4-runtime:4.13.1")
+
+    // JUnit
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 }
 
@@ -25,6 +29,26 @@ tasks.generateGrammarSource {
     outputDirectory = file("build/generated-src/antlr/main/io/kestra/sql/grammar")
 }
 
-sourceSets["main"].java {
-    srcDir("build/generated-src/antlr/main")
+sourceSets {
+    named("main") {
+        java.srcDir("build/generated-src/antlr/main")
+    }
+}
+
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+}
+
+// ----------
+// Fat JAR
+// ----------
+tasks.shadowJar {
+    archiveClassifier.set("all")     // produces sql-splitter-0.1.0-all.jar
+    mergeServiceFiles()
+}
+
+tasks.jar {
+    manifest {
+        attributes["Main-Class"] = "io.kestra.sql.example.Example"
+    }
 }
